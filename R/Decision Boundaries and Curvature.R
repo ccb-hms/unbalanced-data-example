@@ -8,7 +8,7 @@ set.seed(0)
 
 # Number of points in each class
 n1 <- 500
-n0 <- c(25, 500)[2] # (!) Set to 1 for unbalanced data, 2 for balanced data
+n0 <- c(25, 500)[1] # (!) Set to 1 for unbalanced data, 2 for balanced data
 
 # Define true logistic regression parameters
 beta0 <- 2  # Adjusted to shift the boundary
@@ -49,21 +49,38 @@ data$class <- as.numeric(data$class)
 model <- glm(class ~ x1 + x2, data = data, family = binomial)
 
 # Create a grid of values for plotting the decision boundary
-x1_grid <- seq(min(data$x1) - 1, max(data$x1) + 1, length = 100)
-x2_grid <- seq(min(data$x2) - 1, max(data$x2) + 1, length = 100)
+x1_grid <- seq(min(data$x1) - 1, max(data$x1) + 1, length = 200)
+x2_grid <- seq(min(data$x2) - 1, max(data$x2) + 1, length = 200)
 grid <- expand.grid(x1 = x1_grid, x2 = x2_grid)
-grid$prob <- predict(model, newdata = grid, type = "response")
 
-# Decision boundary: where the predicted probability is 0.5
-decision_boundary <- grid[abs(grid$prob - 0.5) < 0.01, ]
+# Compute standard errors for predictions
+preds <- predict(model, newdata = grid, type = "link", se.fit = TRUE)
+grid$fit <- preds$fit
+grid$se.fit <- preds$se.fit
+grid$upr <- grid$fit + 1.96 * grid$se.fit
+grid$lwr <- grid$fit - 1.96 * grid$se.fit
+
+# Transform back to probabilities
+grid$prob <- 1 / (1 + exp(-grid$fit))
+grid$upr_prob <- 1 / (1 + exp(-grid$upr))
+grid$lwr_prob <- 1 / (1 + exp(-grid$lwr))
+
+# Decision boundaries with confidence intervals
+threshold <- 0.05  # Adjust threshold to capture more points
+decision_boundary <- grid[abs(grid$prob - 0.5) < threshold, ]
+decision_boundary_upr <- grid[abs(grid$upr_prob - 0.5) < threshold, ]
+decision_boundary_lwr <- grid[abs(grid$lwr_prob - 0.5) < threshold, ]
 
 ggplot(data, aes(x = x1, y = x2, color = as.factor(class))) +
   geom_point(size = 2) +
-  labs(title = "Data and Estimated Logistic Regression Decision Boundary",
+  labs(title = "Data and Estimated Logistic Regression Decision Boundary with 95% CI",
        x = "X1", y = "X2") +
   scale_color_manual(values = c("blue", "red"), name = "Class") +
-  geom_line(data = decision_boundary, aes(x = x1, y = x2), color = "black", linetype = "dashed") +
+  geom_smooth(data = decision_boundary, aes(x = x1, y = x2), color = "black", linetype = "dashed", lwd = 1) +
+  geom_smooth(data = decision_boundary_upr, aes(x = x1, y = x2), color = "black", linetype = "dotted", lwd = 1) +
+  geom_smooth(data = decision_boundary_lwr, aes(x = x1, y = x2), color = "black", linetype = "dotted", lwd = 1) +
   theme_minimal()
+
 
 # Plot log-likelihood surface for beta1 and beta2
 log_likelihood <- function(beta, x1, x2, y) {
@@ -85,15 +102,20 @@ plot_log_likelihood <- function(data, beta0, beta1_range, beta2_range) {
     }
   }
   
-  ll_df <- expand.grid(beta1 = beta1_range, beta2 = beta2_range)
-  ll_df$log_likelihood <- as.vector(ll_values)
-  
-  plot_ly(x = ~beta1_range, y = ~beta2_range, z = ~ll_values, type = "surface") |>
+  plot_ly(x = ~beta1_range, y = ~beta2_range, z = ~ll_values, type = "surface", 
+          colorscale = list(
+            c(0, 0.002, 0.004, 0.006, 0.008, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1),
+            c("darkblue", "blue", "cyan", 
+              "green", "yellowgreen", "yellow", 
+              "orange", "orangered", "red", "darkred", 
+              "purple", "magenta", "pink", 
+              "white", "grey", "black")
+          )) %>%
     layout(title = "Log-Likelihood Surface",
            scene = list(
              xaxis = list(title = "Beta1"),
              yaxis = list(title = "Beta2"),
-             zaxis = list(title = "Log-Likelihood")
+             zaxis = list(title = "Log-Likelihood")  
            ))
 }
 
@@ -105,4 +127,4 @@ beta2_range <- seq(-20, 5, length.out = 200)
 plot_log_likelihood(data, beta0, beta1_range, beta2_range)
 
 # Estimated model coefficients
-model$coefficients
+summary(model)
