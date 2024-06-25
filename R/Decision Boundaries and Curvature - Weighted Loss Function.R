@@ -8,7 +8,7 @@ set.seed(0)
 
 # Number of points in each class
 n1 <- 500
-n0 <- c(25, 500)[1] # (!) Set to 1 for unbalanced data, 2 for balanced data
+n0 <- c(25, 500)[1]  # Set to 1 for unbalanced data, 2 for balanced data
 
 # Define true logistic regression parameters
 beta0 <- 2  # Adjusted to shift the boundary
@@ -45,19 +45,96 @@ data <- data.frame(
 # Ensure class labels are numeric
 data$class <- as.numeric(data$class)
 
-# Fit logistic regression model
-model <- glm(class ~ x1 + x2, data = data, family = binomial)
+# Define weighted log-likelihood function
+weighted_log_likelihood <- function(beta, x1, x2, y, weight_f0, weight_f1) {
+  log_odds <- beta[1] + beta[2] * x1 + beta[3] * x2
+  probs <- 1 / (1 + exp(-log_odds))
+  eps <- 1e-6
+  probs <- pmin(pmax(probs, eps), 1 - eps)
+  
+  # Calculate log-likelihood contributions
+  log_likelihood <- y * log(probs) + (1 - y) * log(1 - probs)
+  
+  # Apply weights based on y values (0 or 1)
+  weighted_ll <- weight_f0 * (1 - y) * log(1 - probs) + weight_f1 * y * log(probs)
+  
+  # Return negative weighted log-likelihood for minimization
+  return(-sum(weighted_ll))
+}
 
-# Create a grid of values for plotting the decision boundary
-x1_grid <- seq(min(data$x1) - 1, max(data$x1) + 1, length = 200)
-x2_grid <- seq(min(data$x2) - 1, max(data$x2) + 1, length = 200)
+# Weighted logistic regression function with SE computation
+weighted_logistic_regression <- function(data, weight_f0, weight_f1) {
+  x1 <- data$x1
+  x2 <- data$x2
+  y <- data$class
+  
+  # Custom optimization to find the best beta values
+  optimize_logistic <- function(data, weight_f0, weight_f1) {
+    x1 <- data$x1
+    x2 <- data$x2
+    y <- data$class
+    
+    initial_beta <- c(0, 0, 0)
+    opt_result <- optim(
+      par = initial_beta,
+      fn = weighted_log_likelihood,
+      x1 = x1,
+      x2 = x2,
+      y = y,
+      weight_f0 = weight_f0,
+      weight_f1 = weight_f1,
+      method = "L-BFGS-B"  # Try different optimization methods
+    )
+    
+    return(opt_result$par)
+  }
+  
+  # Function to create diagonal matrix of weights for variance calculation
+  weights_f0_f1 <- function(probs, weight_f0, weight_f1) {
+    diag_weights <- diag(c((1 - probs) * probs * ifelse(y == 0, weight_f0, weight_f1)))
+    return(diag_weights)
+  }
+  
+  # Find optimized beta values
+  optimized_beta <- optimize_logistic(data, weight_f0, weight_f1)
+  
+  # Compute standard errors for beta estimates
+  design_matrix <- model.matrix(~ x1 + x2, data = data)
+  log_odds <- design_matrix %*% optimized_beta
+  probs <- 1 / (1 + exp(-log_odds))
+  
+  # Diagonal matrix of weights for variance calculation
+  weights <- weights_f0_f1(probs, weight_f0, weight_f1)
+  
+  # Variance-covariance matrix
+  var_covar_matrix <- solve(t(design_matrix) %*% weights %*% design_matrix)
+  
+  return(list(beta = optimized_beta, var_covar_matrix = var_covar_matrix))
+}
+
+# Weights for false positives and false negatives
+weight_f0 <- 20
+weight_f1 <- 1
+
+# Perform weighted logistic regression
+model <- weighted_logistic_regression(data, weight_f0, weight_f1)
+
+# Output estimated coefficients and standard errors
+cat("Estimated Coefficients:\n")
+print(model$beta)
+cat("\nStandard Errors:\n")
+print(sqrt(diag(model$var_covar_matrix)))
+
+# Create a grid of values for plotting the decision boundary and CIs
+x1_grid <- seq(min(data$x1) - 1, max(data$x1) + 1, length = 100)
+x2_grid <- seq(min(data$x2) - 1, max(data$x2) + 1, length = 100)
 grid <- expand.grid(x1 = x1_grid, x2 = x2_grid)
 
-# Compute standard errors for predictions
+# Compute predictions and standard errors on the grid
 alpha <- 0.05
-preds <- predict(model, newdata = grid, type = "link", se.fit = TRUE)
-grid$fit <- preds$fit
-grid$se.fit <- preds$se.fit
+design_matrix_grid <- model.matrix(~ x1 + x2, data = grid)
+grid$fit <- design_matrix_grid %*% model$beta
+grid$se.fit <- sqrt(diag(design_matrix_grid %*% model$var_covar_matrix %*% t(design_matrix_grid)))
 grid$upr <- grid$fit + qnorm(1 - alpha/2) * grid$se.fit
 grid$lwr <- grid$fit - qnorm(1 - alpha/2) * grid$se.fit
 
@@ -82,24 +159,14 @@ ggplot(data, aes(x = x1, y = x2, color = as.factor(class))) +
   geom_smooth(data = decision_boundary_lwr, aes(x = x1, y = x2), color = "black", linetype = "dotted", lwd = 1) +
   theme_minimal()
 
-
 # Plot log-likelihood surface for beta1 and beta2
-log_likelihood <- function(beta, x1, x2, y) {
-  log_odds <- beta[1] + beta[2] * x1 + beta[3] * x2
-  probs <- 1 / (1 + exp(-log_odds))
-  eps <- 1e-6
-  probs <- pmin(pmax(probs, eps), 1 - eps)
-  ll <- sum(y * log(probs) + (1 - y) * log(1 - probs))
-  return(-ll)  # Negative log-likelihood for minimization
-}
-
-plot_log_likelihood <- function(data, beta0, beta1_range, beta2_range) {
+plot_weighted_log_likelihood <- function(data, beta0, beta1_range, beta2_range, weight_f0, weight_f1) {
   ll_values <- matrix(NA, nrow = length(beta1_range), ncol = length(beta2_range))
   
   for (i in 1:length(beta1_range)) {
     for (j in 1:length(beta2_range)) {
       beta <- c(beta0, beta1_range[i], beta2_range[j])
-      ll_values[i, j] <- log_likelihood(beta, data$x1, data$x2, data$class)
+      ll_values[i, j] <- weighted_log_likelihood(beta, data$x1, data$x2, data$class, weight_f0, weight_f1)
     }
   }
   
@@ -125,7 +192,4 @@ beta1_range <- seq(-20, 5, length.out = 200)
 beta2_range <- seq(-20, 5, length.out = 200)
 
 # Plot the log-likelihood surface for beta1 and beta2
-plot_log_likelihood(data, beta0, beta1_range, beta2_range)
-
-# Estimated model coefficients
-summary(model)
+plot_weighted_log_likelihood(data, beta0, beta1_range, beta2_range, weight_f0, weight_f1)
